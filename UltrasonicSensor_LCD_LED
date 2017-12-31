@@ -1,0 +1,590 @@
+ 
+; SDU Bilgisayar Muhendisligi Bolumu
+; 
+; Mikroislemciler dersi, Uygulama Odevi 2 ye yardimci olmasi icin hazirlanan bu dosyada  
+; asagidaki konulara ornekler verilmistir.
+; 1. LCD modulunun ayarlanmasi ve degisik kullanimlari gosterilmistir. Bunlar:
+;    a) LCD ilk satirina BIL301 nin yazdirilmasi
+;    b) LCD ikinci satirina Mikroislemciler yazdirilmasi. Mikroislemciler karakter dizisindeki 
+;       karakterler program hafizasina kaydedilerek oradan okunmustur.
+;    c) 16 bitlik iki sayinin bolunmesiyle elde edilen sonucun hex formatinda yazdirilmasi
+;
+; 2. 16 bitlik iki sayinin nasil bolunecegi gosterilmistir.
+;
+; Version 1.0
+; 10.12.2017
+; Yrd. Doc. Dr. Fatih Gokce
+
+.EQU	LCD_DPRTH = PORTH
+.EQU	LCD_DDDRH = DDRH
+.EQU	LCD_DPRTE = PORTE
+.EQU	LCD_DDDRE = DDRE
+.EQU	LCD_DPRTG = PORTG
+.EQU	LCD_DDDRG = DDRG
+	
+.EQU	LCD_CPRT = PORTH 	
+.EQU	LCD_CDDR = DDRH		
+.EQU	LCD_RS = 5 		; PH5
+.EQU	LCD_EN = 6		; PH6
+.EQU	LCD_BL = 4		; PB4
+.EQU	LINE1 = 0x80
+.EQU	LINE2 = 0xC0	
+.equ	deger = 0x230
+.equ	minDeger = 0x234
+.equ	maxDeger = 0xd4
+
+.org 0
+rjmp setup
+.org 0x0002
+	jmp int0_ISR
+.org 0x0004
+	jmp int1_ISR
+.org 0x002c
+	jmp timer0_ISR
+.org 0x0006
+	jmp int2_ISR
+
+
+.org 0x80
+MYDATA: .DB "Mesafe:",0 ; Sondaki 0 a dikkat, NULL deger olarak ekliyoruz
+MYDATA2: .DB "Min:    Mx:",0
+setup:
+	LDI	R21,HIGH(RAMEND)
+	OUT	SPH,R21
+	LDI	R21,LOW(RAMEND)
+	OUT	SPL,R21
+	call setupLCD	
+	call setupMesafe ; ultrasonic sensor icin gerekli ayarlar? yap?yoruz
+MAIN: 
+	call CLEARLCD	; LCD yi silip ilk satirin en solundan yazmaya basliyoruz
+
+	lds r16, 20 ; minumum de?erini belirliyoruz
+	sts minDeger, r16 ; minumum de?erini sram üzerine kaydediyoruz
+
+	lds r16, 40 
+	sts maxDeger, r16
+
+	LDI	 R16, LINE2	; Cursor u ikinci satirinin basina gecirmek istiyoruz
+	call LCDGOTO
+	call writeMikro
+	
+	ldi r16, LINE1 ; Cursor u 1.sat?ra geitriyoruz
+	call LCDGOTO
+	call writeMinMax ; Program memory e kaydetti?imiz Min ve Max kelimlerini yazd?r?yoruz
+
+	ldi r24, 1
+
+	ldi r21, 0
+
+	ldi r16, 0x03
+	out tccr0b, r16 ; Prescaler i 64 e set ediyoruz
+
+;Burada  ultrasonic senorumuz için kare dalga uretiyoruz. 20 x 256 * 120 * 0.0625 = 38,4 ms yuksek seviye,  
+
+again:
+	cpi r21, 20 ; 
+	brsh L6
+	sbi portc, 5
+	rjmp again
+L6: 
+	cbi portc, 5
+	rjmp again
+
+timer0_ISR:
+	inc r21
+	reti
+
+int0_ISR:
+	lds r23, tccr1b
+	cp r24, r23
+	breq L5
+	sts tccr1b, r24
+	reti
+L5:
+
+	ldi r18, 70
+	ldi r19, 4
+	lds r16, tcnt1l
+	lds r17, tcnt1h
+	call div16u
+	ldi r18, 0
+	ldi r17, 10
+L7:
+	inc r18
+	sub r16, r17
+	brcc L7
+	dec r18
+	add r16, r17
+
+	mov r17, r16
+	
+
+	LDI	 R16, LINE2+8
+	call LCDGOTO
+	mov r16, r18
+	ori r16, 0x30
+	call DATAWRT
+
+	
+	LDI	 R16, LINE2+9
+	call LCDGOTO
+	mov r16, r17
+	ori r16, 0x30
+	call DATAWRT
+
+	
+	ldi r18, 0
+	sts tcnt1h, r18
+	sts tcnt1l, r18
+	sts	tccr1b, r18
+	
+	reti
+
+;-----------------------------------------------------------
+
+int1_ISR:
+	lds r16, deger
+	lds r17, minDeger
+	cp r16, r17
+	breq Min_Max
+	lds r17, maxDeger
+	sts deger, r17
+	reti
+Min_Max:
+	lds r17, minDeger
+	sts deger, r17
+	reti
+;-------------------------------------------------------
+
+	; Burada rotaryi encoder in donus esnasında etkilenen pind3 yani 18. pinin değerinin set edilip edilmediğini kontrol ettirirerek arttırma veya
+	; azaltma arasında seçim yapmış oluyoruz. Bu interreupt ın tetiklenmesi için öncelikle dt pinin 1 den 0 a düşmesi gerekiyor. Çünkü interruptları 
+	;belirlerken int2 için düşen kenara göre tetikle kuralını belirledik. 1 den 0 düştüğü anda hemen pin3 değerini okuyoruz. Eğer
+	; pin3 0 ise dallanma yaparak "here" tarafından işaret edilen adrese giderek azaktma yapıyoruz. Aksi durumda dallanmayı atlayarak arttırma işlemni
+	; gerçekleştiriyoruz
+
+INT2_ISR:					
+	lds r16, deger			; 
+	sbis pind, 3			
+	rjmp here
+	
+	inc r16
+	sts deger,r16
+	
+	call yaz
+
+	reti
+here:dec r16
+	sts deger,r16
+	
+	call yaz
+
+
+	reti
+;------------------------------------------------------------
+	; odevinizde 16 bitlik sayilarin birbirine bolunmesine ihtiyac duyacaksiniz
+	; burada div16u fonksiyonunu kullanarak bunu nasil yapabileceginize bir ornek veriyoruz.
+	; 6120/79 bolme islemini yaptiracagiz, elde edecegimiz 77 (0x4D) sonucunu hexadecimal olarak 
+	; lcd ye yazdiracagiz. tabi odevinizde mesafe olcumlerini decimal olarak yazdirmaniz isteniyor
+	; 8 bitlik bir register daki sayinin decimal degerini lcd ye nasil yazdiracaginizi kesfetmek size kaliyor.
+	LDI R18, 0x4F   ; 
+	LDI R19, 0		; R19:R18 = 79
+	LDI R16, 0xE8
+	LDI R17, 0x17	; R17:R16 = 6120 
+	call div16u		; sonuc R17:R16 da hesaplanmis durumda
+					; 6120/79 = 77 oldugu icin R17 nin icerigi 0, sadece R16 yi yazdiracagiz
+	mov r20, r16
+	
+	LDI	 R16, LINE2+8 ; Cursor u birinci satirin soldan 4. karakterine gecirmek istiyoruz
+	call LCDGOTO
+	call writeToLcdHex  ; 77 nin hexadecimal degeri olan 0x4D yi nasil yazdiririz onun ornegini veriyoruz
+						; odevinizde mesafe olcumlerini decimal olarak yazdirmaniz isteniyor
+						; 8 bitlik bir register daki sayinin decimal degerini lcd ye nasil yazdiracaginizi kesfetmek size kaliyor.
+	call wait700ms
+
+	JMP MAIN	
+	
+;-------------------------------------------------------
+setupLCD:
+	LDI	 R21,0xFF;		
+	STS  LCD_DDDRH, R21	
+	OUT  LCD_DDDRE, R21	
+	OUT  LCD_DDDRG, R21	
+	STS  LCD_CDDR, R21	
+	OUT  DDRB, R21	
+	SBI	 PORTB,LCD_BL	; LCD nin isigini aciyoruz
+	LDI	 R16,0x33		
+	CALL CMNDWRT		
+	CALL DELAY_2ms		
+	LDI	 R16,0x32		
+	CALL CMNDWRT		
+	CALL DELAY_2ms		
+	LDI	 R16,0x28	; Function set	
+	CALL CMNDWRT		
+	CALL DELAY_2ms		
+	LDI	 R16,0x0C	; Display On/Off control
+	CALL CMNDWRT		
+	LDI	 R16,0x01	; Clear display command	
+	CALL CMNDWRT		
+	CALL DELAY_2ms		
+	LDI	 R16,0x06	; Entry mode set	
+	CALL CMNDWRT
+	RET
+			
+;-------------------------------------------------------
+setupMesafe:
+	sbi ddrc, 5  ; Burada 32. pinimizi Trig dalgasi gondermek icin set ediyoruz
+	
+	sbi portd, 0 ; portd nin 0., 1., 2., ve 3. pinleri icin Pull-up direncini aktif ediyoruz
+	sbi portd, 1
+	sbi portd, 2
+	sbi portd, 3
+
+	ldi r16, 0xa1	; Burada int0 icin herhangi bir kenar tetiklemsi, int1 icin low level ve int2 icin dusen kenar tetiklemsini etkin yapiyoruz
+	sts eicra, r16
+	ldi r16,   1<<int2  | 1<<int1 | 1<<int0  ; kullanacagimiz interruptlari belirliyoruz
+	out eimsk, r16
+
+	ldi r16, 0               ;Timer1 in degirini 0 liyoruz
+	sts tcnt1h, r16
+	sts tcnt1l, r16
+
+	ldi r16, 0
+	sts tcnt2, r16
+	
+       
+	ldi r16, 0				;Timer0 in de?erini 0 liyoruz
+	out tcnt0, r16
+	ldi r16, 120
+	out ocr0b, r16          ; Burda Output Compare registerina 120 degerini yukle
+	
+	ldi r16, 1<<ocie0b		; timer0 interrupt ini etkinle?tiriyoruz
+	sts timsk0, r16
+	sei
+	ret
+
+
+;-----------------------------------------------------------------------------
+	;Burada yazacağımız değeri 10 luk tabanda ifade etmek için, her 10 ile bölme işlemini gerçeklştiriyoruz. Bölüm kısmı iki basamaklı sayının 
+	; 10 lar basamağını, kalan kısmı ise 1 ler basamağını ifade ediyor. Ör: 87 sayısı için; 87/10 = 8(bölüm) + 7(kalan). Ardından sırası ile basamak değerlerini
+	; cursor u kaydırarak yazdırıyoruz.
+	
+yaz:
+	ldi r18, 0
+	ldi r17, 10
+L8:
+	inc r18
+	sub r16, r17
+	brcc L8
+	dec r18
+	add r16, r17
+
+	mov r17, r16
+	
+
+	LDI	 R16, LINE1+4
+	call LCDGOTO
+	mov r16, r18
+	ori r16, 0x30
+	call DATAWRT
+
+	
+	LDI	 R16, LINE1+5
+	call LCDGOTO
+	mov r16, r17
+	ori r16, 0x30
+	call DATAWRT
+	ret
+	
+
+;-------------------------------------------------------
+CMNDWRT:						
+	MOV	 R27,R16
+	ANDI R27,0xF0
+	CALL CONVERTBITS
+	LDS  R27, LCD_CPRT
+	CBR  R27, (1<<LCD_RS)
+	SBR  R27, (1<<LCD_EN)
+	STS	 LCD_CPRT,R27	
+	CALL SDELAY				
+	LDS  R27, LCD_CPRT
+	CBR  R27, (1<<LCD_EN)
+	STS	 LCD_CPRT,R27	
+	CALL DELAY_100us
+
+	MOV	 R27,R16
+	SWAP R27				
+	ANDI R27,0xF0			
+	CALL CONVERTBITS
+	LDS  R27, LCD_CPRT
+	SBR  R27, (1<<LCD_EN)
+	STS	 LCD_CPRT,R27	
+	CALL SDELAY				
+	LDS  R27, LCD_CPRT
+	CBR  R27, (1<<LCD_EN)
+	STS	 LCD_CPRT,R27	
+	CALL DELAY_100us		
+	RET
+
+;-------------------------------------------------------
+DATAWRT:
+	MOV	R27,R16
+	ANDI R27,0xF0
+	CALL CONVERTBITS
+	LDS  R27, LCD_CPRT
+	SBR  R27, (1<<LCD_RS)
+	SBR  R27, (1<<LCD_EN)
+	STS	 LCD_CPRT,R27
+	CALL SDELAY				
+	LDS  R27, LCD_CPRT
+	CBR  R27, (1<<LCD_EN)
+	STS	 LCD_CPRT,R27
+
+	MOV	 R27,R16
+	SWAP R27				
+	ANDI R27,0xF0			
+	CALL CONVERTBITS
+	LDS  R27, LCD_CPRT
+	SBR  R27, (1<<LCD_EN)
+	STS	 LCD_CPRT,R27
+	CALL SDELAY				
+	LDS  R27, LCD_CPRT
+	CBR  R27, (1<<LCD_EN)
+	STS	 LCD_CPRT,R27	
+	
+	CALL DELAY_100us		
+	RET
+;-------------------------------------------------------
+CLEARLCD:
+	LDI	 R16,0x01		
+	CALL CMNDWRT		
+	CALL DELAY_2ms
+	RET
+	
+;-------------------------------------------------------
+LCDGOTO:
+	CALL CMNDWRT
+	RET
+
+;-------------------------------------------------------
+CONVERTBITS:
+	PUSH R20
+	SWAP R27
+	; 0, 1, 2, 3 -> PG5, PE3, PH3, PH4
+	MOV R20, R27
+	ANDI R20, 0x01
+	LSL R20
+	LSL R20
+	LSL R20
+	LSL R20
+	LSL R20
+	OUT LCD_DPRTG, R20
+	MOV R20, R27
+	ANDI R20, 0x02
+	LSL R20
+	LSL R20
+	OUT LCD_DPRTE, R20
+	MOV R20, R27
+	ANDI R20, 0x0C
+	LSL R20
+	LDS R27, PINH
+	ANDI R27, 0x60
+	OR	R20, R27
+	STS LCD_DPRTH, R20
+	POP	R20
+	RET
+;-------------------------------------------------------
+SDELAY:	NOP
+	NOP
+	RET
+;-------------------------------------------------------
+DELAY_100us:
+	PUSH R17
+	NOP
+	NOP
+	LDI	 R17,122
+DR0:	
+	CALL SDELAY
+	DEC	 R17
+	BRNE DR0
+	POP	 R17
+	RET
+;-------------------------------------------------------
+DELAY_2ms:
+	PUSH R17
+	PUSH R18
+	LDI	 R17,19
+LDR0:	
+	CALL DELAY_100US
+	LDI	 R18,16
+LDR1:
+	NOP
+	NOP
+	DEC	 R18
+	BRNE LDR1
+	DEC	 R17
+	BRNE LDR0
+	POP	 R18
+	POP	 R17
+	NOP
+	NOP
+	NOP
+	NOP
+	NOP
+	NOP
+	NOP
+	RET
+
+;-------------------------------------------------------
+wait700ms:				; 700ms lik bekleme saglayan fonksiyonumuz
+   push r17			; mainloop icerisinde kullandigimiz r17 nin degerini wait icinde de kullanmak istiyoruz.
+					; bu nedenle push komutunu kullanarak bu registerlarin icindeki degerleri yigina kaydediyoruz
+   
+   ldi r16,0x40 	; 0x400000 kere dongu calistirilacak
+   ldi r17,0x00 	; ~12 milyon komut cycle i surecek
+   ldi r18,0x00 	; 16Mhz calisma frekansi icin ~0.7s zaman gecikmesi elde edilecek
+_w0:
+   dec r18			; r18 deki degeri 1 azalt
+   brne _w0			; azaltma sonucu elde edilen deger 0 degilse _w0 a dallan
+   dec r17			; r17 deki degeri 1 azalt
+   brne _w0			; azaltma sonucu elde edilen deger 0 degilse _w0 a dallan
+   dec r16			; r16 daki degeri 1 azalt
+   brne _w0			; azaltma sonucu elde edilen deger 0 degilse _w0 a dallan
+
+   pop r17			; fonksiyondan donmeden once en son push edilen r17 yi geri cek
+   
+   ret				; fonksiyondan geri don
+
+;-------------------------------------------------------
+writeBIL301:
+	LDI	 R16,'B'		
+	CALL DATAWRT		
+	LDI	 R16,'I'		
+	CALL DATAWRT		
+	LDI	 R16,'L'		
+	CALL DATAWRT		
+	LDI	 R16,3
+	ORI	 R16,0x30	; 3 degerini ASCII ye cevirmek icin 0x30 ile VEYA liyoruz	
+	CALL DATAWRT		
+	LDI	 R16,0			
+	ORI	 R16,0x30	; 0 degerini ASCII ye cevirmek icin 0x30 ile VEYA liyoruz
+	CALL DATAWRT		
+	LDI	 R16,1			
+	ORI	 R16,0x30	; 1 degerini ASCII ye cevirmek icin 0x30 ile VEYA liyoruz	
+	CALL DATAWRT
+	RET
+
+;-------------------------------------------------------
+writeMikro:
+	LDI ZH, HIGH(mydata<<1)
+	LDI ZL, LOW(mydata<<1)
+L1:
+	LPM	 R16, Z+	; program hafizasindan Z ile adresi verilen datayi register a aktarmayi saglar
+	CPI  R16, 0
+	BREQ L2
+	CALL DATAWRT
+	rjmp L1
+L2:
+	RET
+
+;-------------------------------------------------------
+writeMinMax:
+	LDI ZH, HIGH(mydata2<<1)
+	LDI ZL, LOW(mydata2<<1)
+L3:
+	LPM	 R16, Z+	; program hafizasindan Z ile adresi verilen datayi register a aktarmayi saglar
+	CPI  R16, 0
+	BREQ L4
+	CALL DATAWRT
+	rjmp L3
+L4:
+	RET
+
+;-------------------------------------------------------
+writeToLcdHex:
+	ldi r16, '0'
+	call DATAWRT
+	ldi r16, 'x'
+	call DATAWRT
+
+	mov r21, r20
+	swap r21
+	andi r21, 0x0f
+	cpi r21, 0x0A
+	brsh Label1
+	ori r21, 0x30
+	rjmp Label2
+Label1:
+	ori r21, 0x40
+	subi r21, 9
+Label2:
+	mov r16, r21
+	call DATAWRT
+	
+	mov r21, r20
+	andi r21, 0x0f
+	cpi r21, 0x0A
+	brsh Label3
+	ori r21, 0x30
+	rjmp Label4
+Label3:
+	ori r21, 0x40
+	subi r21, 9
+Label4:
+	mov r16, r21
+	call DATAWRT
+	
+	ret
+
+
+;-------------------------------------------------------
+;***************************************************************************
+;*
+;* "div16u" - 16/16 Bit Unsigned Bolme
+;*
+;* http://www.atmel.com/Images/doc0936.pdf dokumaninda anlatilan algoritmalarin gerceklestirildigi 
+;* https://people.ece.cornell.edu/land/courses/eceprojectsland/STUDENTPROJ/1999to2000/mlk24KATZ/code/avr200.asm
+;* de bulunan dosyadan uyarlanmistir. Farkli aritmetik islemlere ihtiyac duymaniz durumunda bu dosyadan faydalanabilirsiniz.
+;*
+;*
+;* Bu fonksiyon iki 16-bit sayiyi birbirine bolmemizi saglar 
+;* "dd16uH:dd16uL" (bolunen) and "dv16uH:dv16uL" (bolen). 
+;* Sonuc degeri "dres16uH:dres16uL" icine kalan degeri de 
+;* "drem16uH:drem16uL" icine kaydedilir.
+;*
+;***************************************************************************
+
+;***** Register Tanimlamalari
+
+.def	drem16uL=r14
+.def	drem16uH=r15
+.def	dres16uL=r16
+.def	dres16uH=r17
+.def	dd16uL	=r16
+.def	dd16uH	=r17
+.def	dv16uL	=r18
+.def	dv16uH	=r19
+.def	dcnt16u	=r20
+
+div16u:	
+	
+	clr	drem16uL
+	sub	drem16uH,drem16uH
+	ldi	dcnt16u,17	
+d16u_1:
+	rol	dd16uL
+	rol	dd16uH
+	dec	dcnt16u
+	brne	d16u_2
+	ret
+d16u_2:
+	rol	drem16uL
+	rol	drem16uH
+	sub	drem16uL,dv16uL
+	sbc	drem16uH,dv16uH
+	brcc	d16u_3
+	add	drem16uL,dv16uL
+	adc	drem16uH,dv16uH
+	clc
+	rjmp	d16u_1
+d16u_3:	sec
+	rjmp	d16u_1
